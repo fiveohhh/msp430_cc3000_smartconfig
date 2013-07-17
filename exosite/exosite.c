@@ -52,6 +52,8 @@
 #define MAC_LEN 6
 
 
+
+
 enum lineTypes
 {
   CIK_LINE,
@@ -77,6 +79,9 @@ enum lineTypes
 #define STR_MODEL "model="
 #define STR_SN "sn="
 #define STR_CRLF "\r\n"
+
+// string used to find the Content-Length header
+const char HTTP_HDR_CONTENT_LENGTH[] = "Content-Length: ";
 
 // local functions
 int info_assemble(const char * vendor, const char *model, const char *sn);
@@ -308,10 +313,11 @@ Exosite_Activate(void)
   if (200 == http_status)
   {
     unsigned char len;
-    unsigned char cik_len_valid = 0;
-    unsigned char cik_ctrl = 0;
+    unsigned char is_cik_len_valid = 0;
+    uint8_t length_found = 0;
+
     char *p;
-    unsigned char crlf = 0;
+
     unsigned char ciklen = 0;
     char NCIK[CIK_LENGTH + 3];
 
@@ -320,38 +326,91 @@ Exosite_Activate(void)
       strLen = exoHAL_SocketRecv(sock, strBuf, RX_SIZE);
       len = strLen;
       p = strBuf;
-
-      // Find 4 consecutive \r or \n - should be: \r\n\r\n
-      while (0 < len && 4 > crlf)
+    
+    
+      //********Look for Content-Length header***********
+      // Content-Length header starts with "Content-Length: "
+      // While the header check should be case insensitive, we're not going
+      // to worry about that for now
+      
+      // while cik length isn't verified and we haven't found the content length header
+      while(is_cik_len_valid == 0 && length_found == 0 && len > 0)
       {
-        if ('\r' == *p || '\n' == *p)
+        // if we match the first letter of the content length header 
+        if(*p == HTTP_HDR_CONTENT_LENGTH[0])
         {
-          ++crlf;
+            uint8_t i = 1;
+            uint8_t match = 1;
+            
+            // try and match the rest of the content length header
+            for(; (match == 1) && (i <= sizeof(HTTP_HDR_CONTENT_LENGTH)); i++)
+            {
+                match = *(p + i) == HTTP_HDR_CONTENT_LENGTH[0];
+            }
+            
+            // if we matched the entire string (found content-length header)
+            if (match == 1 && i == sizeof(HTTP_HDR_CONTENT_LENGTH))
+            {
+                length_found = 1;
+                //check that length is 40
+                is_cik_len_valid = (*(p+i+1) == '4') && (*(p+i+2) == '0') && (*(p+i+3) == '\r') && (*(p+i+4) == '\n');
+                
+                // update p to point to next line
+                p += i + 5;
+            }
         }
-        else
+        
+        // increment p, decrement decrement remaining length
+        p++;
+        len--;
+      }
+      
+      if (len == 0)
+      {
+        return 0;
+      }
+      
+      //************   Look for response body *************
+      // response body follows an empty line.
+      
+      
+      uint8_t bodyFound = 0;
+      
+      // this is used to determine if we are starting on a newline
+      // once a non \r or \n char is read, this is cleared until the next /r/n is found
+      uint8_t isNewLine = 1; 
+      
+      while (!bodyFound && len > 0 )
+      {
+        if (isNewLine)
         {
-          crlf = 0;
-          // check the cik length from http response
-            if(cik_ctrl == 0 && 'L'== *p)
-              cik_ctrl = 1;
-            else if (cik_ctrl == 3 && 'g' == *p)    // Find Len'g'th:
-              cik_ctrl += 1;
-            else if (cik_ctrl >= 1 && cik_ctrl < 3)
-              cik_ctrl++;
-
-            if (cik_ctrl == 4 && ('4' == *p || '0' == *p))
-              cik_len_valid++;
+            if (*(p + 1) == '\r' && *(p + 1) == '\n')
+            {
+                bodyFound = 1;
+                // move p to next line (message body)
+                p += 2;
+                len -= 2;
+            }
+            else
+            {
+                p++;
+                len--;
+                isNewLine = 0;
+            }
         }
-        ++p;
-        --len;
+      }
+      
+      if (len == 0)
+      {
+        return 0;
       }
 
       // The body is the cik
-      if (0 < len && 4 == crlf && CIK_LENGTH > ciklen)
+      if (0 < len && CIK_LENGTH > ciklen)
       {
         // TODO, be more robust - match Content-Length header value to CIK_LENGTH
         unsigned char need, part;
-        if (!(cik_len_valid == 2)) // cik length != 40
+        if (!(is_cik_len_valid)) // cik length != 40
         {
           status_code = EXO_STATUS_CONFLICT;
           return newcik;
